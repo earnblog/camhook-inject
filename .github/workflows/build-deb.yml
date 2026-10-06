@@ -13,6 +13,7 @@ jobs:
       - name: 安装 Theos
         run: |
           export THEOS=$HOME/theos
+          rm -rf $THEOS
           git clone --depth=1 https://github.com/theos/theos.git $THEOS
           cd $THEOS
           git submodule update --init --recursive
@@ -20,7 +21,9 @@ jobs:
 
       - name: 补 iOS SDK
         run: |
-          git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+          export THEOS=$HOME/theos
+          rm -rf $THEOS/sdks
+          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
 
       - name: 编译 rootless .deb
         run: |
