@@ -1,0 +1,9 @@
+Package: com.earnblog.camhook
+Name: CamHook
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: 相机回调换帧插件（VCamProvider + 帧替换）
+Maintainer: earnblog
+Author: earnblog
+Section: Tweaks
+Depends: ellekit
