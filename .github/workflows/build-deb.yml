@@ -29,11 +29,15 @@ jobs:
           rm -rf $THEOS/sdks
           git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
 
+      - name: 强制转换 control 换行符
+        run: |
+          sed -i '' 's/\r$//' control || true
+          cat -A control
+
       - name: 编译 rootless .deb
         run: |
           export THEOS=$HOME/theos
           export PATH="$(brew --prefix)/bin:$PATH"
-          ls "$THEOS/makefiles"
           make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
           ls -la packages
 
