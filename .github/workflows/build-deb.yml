@@ -32,7 +32,6 @@ jobs:
       - name: 强制转换 control 换行符
         run: |
           sed -i '' 's/\r$//' control || true
-          cat -A control
 
       - name: 编译 rootless .deb
         run: |
