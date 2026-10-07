@@ -3,6 +3,21 @@
 #import <pthread.h>
 #import <sys/stat.h>
 
+// 文件日志
+static void CamLog(const char *fmt, ...) {
+    FILE *fp = fopen("/var/mobile/Media/camhook.log", "a");
+    if (!fp) return;
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    fprintf(fp, "[%02d:%02d:%02d] ", t->tm_hour, t->tm_min, t->tm_sec);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
 struct VCamProvider {
     AVAsset                    *asset;
     AVAssetReader              *reader;
@@ -23,17 +38,16 @@ static bool VCamProviderRestartReader(VCamProvider *p) {
     NSError *err = nil;
     AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:p->asset error:&err];
     if (!reader || err) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] AVAssetReader create failed: %{public}@", err);
+        CamLog("AVAssetReader create failed: %s", err ? err.localizedDescription.UTF8String : "nil");
         return false;
     }
 
     AVAssetTrack *track = [[p->asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
     if (!track) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] no video track");
+        CamLog("no video track");
         return false;
     }
 
-    // 和你跑通的 main.m 保持一致，用 32BGRA
     NSDictionary *settings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
@@ -43,13 +57,13 @@ static bool VCamProviderRestartReader(VCamProvider *p) {
     output.alwaysCopiesSampleData = NO;
 
     if (![reader canAddOutput:output]) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] cannot add output");
+        CamLog("cannot add output");
         return false;
     }
     [reader addOutput:output];
 
     if (![reader startReading]) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] startReading failed: %{public}@", reader.error);
+        CamLog("startReading failed: %s", reader.error.localizedDescription.UTF8String);
         return false;
     }
 
@@ -60,21 +74,24 @@ static bool VCamProviderRestartReader(VCamProvider *p) {
 
 VCamProvider *VCamProviderCreate(const char *mp4Path) {
     if (!mp4Path || strlen(mp4Path) == 0) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] path empty");
+        CamLog("path empty");
         return NULL;
     }
 
-    os_log(OS_LOG_DEFAULT, "[CamHook] trying load: %s", mp4Path);
+    CamLog("trying load: %s", mp4Path);
 
     struct stat st;
     if (stat(mp4Path, &st) != 0) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] file not exist or no permission: %s errno=%d", mp4Path, errno);
+        CamLog("file not exist or no permission: %s errno=%d", mp4Path, errno);
         return NULL;
     }
-    os_log(OS_LOG_DEFAULT, "[CamHook] file size=%lld", (long long)st.st_size);
+    CamLog("file size=%lld", (long long)st.st_size);
 
     VCamProvider *p = (VCamProvider *)calloc(1, sizeof(VCamProvider));
-    if (!p) return NULL;
+    if (!p) {
+        CamLog("calloc failed");
+        return NULL;
+    }
 
     pthread_mutex_init(&p->lock, NULL);
     p->loop = true;
@@ -83,21 +100,21 @@ VCamProvider *VCamProviderCreate(const char *mp4Path) {
     NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:mp4Path]];
     p->asset = [AVAsset assetWithURL:url];
     if (!p->asset) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] AVAsset nil");
+        CamLog("AVAsset nil");
         VCamProviderDestroy(p);
         return NULL;
     }
 
     p->duration = p->asset.duration;
     if (CMTIME_IS_INVALID(p->duration) || CMTimeCompare(p->duration, kCMTimeZero) <= 0) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] invalid duration");
+        CamLog("invalid duration");
         VCamProviderDestroy(p);
         return NULL;
     }
 
     AVAssetTrack *track = [[p->asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
     if (!track) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] no video track");
+        CamLog("no video track");
         VCamProviderDestroy(p);
         return NULL;
     }
@@ -107,12 +124,12 @@ VCamProvider *VCamProviderCreate(const char *mp4Path) {
     p->height = (int)size.height;
 
     if (!VCamProviderRestartReader(p)) {
+        CamLog("RestartReader failed");
         VCamProviderDestroy(p);
         return NULL;
     }
 
-    os_log(OS_LOG_DEFAULT, "[CamHook] VCamProvider ready: %s %dx%d duration=%.2fs",
-           mp4Path, p->width, p->height, CMTimeGetSeconds(p->duration));
+    CamLog("VCamProvider ready: %s %dx%d duration=%.2fs", mp4Path, p->width, p->height, CMTimeGetSeconds(p->duration));
     return p;
 }
 
@@ -153,7 +170,7 @@ CVPixelBufferRef VCamProviderCopyPixelBufferForTime(VCamProvider *p, CMTime came
     CMSampleBufferRef sb = [p->output copyNextSampleBuffer];
     if (!sb) {
         if (p->loop) {
-            os_log(OS_LOG_DEFAULT, "[CamHook] video end, restart loop");
+            CamLog("video end, restart loop");
             VCamProviderRestartReader(p);
             sb = [p->output copyNextSampleBuffer];
         }
