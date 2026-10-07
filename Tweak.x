@@ -1,4 +1,4 @@
-// CamHook 注入换帧版
+// CamHook 注入换帧版 + 文件日志
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <os/log.h>
@@ -7,11 +7,24 @@
 
 static VCamProvider *gProvider = NULL;
 static NSTimeInterval gLastBanner = 0;
-
-// 视频路径（先写死，后面可改成配置）
 static const char *kTestVideoPath = "/var/mobile/Media/test.mp4";
 
-// ===================== 安全横幅（避免 PAC） =====================
+// 文件日志
+static void CamLog(const char *fmt, ...) {
+    FILE *fp = fopen("/var/mobile/Media/camhook.log", "a");
+    if (!fp) return;
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    fprintf(fp, "[%02d:%02d:%02d] ", t->tm_hour, t->tm_min, t->tm_sec);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fprintf(fp, "\n");
+    fclose(fp);
+}
+
+// ===================== 安全横幅 =====================
 static void CamHookShowBanner(const char *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -72,7 +85,7 @@ static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
                                                                     pixelBuffer,
                                                                     &formatDesc);
     if (status != noErr || !formatDesc) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] formatDesc failed: %d", (int)status);
+        CamLog("formatDesc failed: %d", (int)status);
         return NULL;
     }
 
@@ -93,13 +106,13 @@ static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
     CFRelease(formatDesc);
 
     if (status != noErr) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] CreateSampleBuffer failed: %d", (int)status);
+        CamLog("CreateSampleBuffer failed: %d", (int)status);
         return NULL;
     }
     return newBuffer;
 }
 
-// ===================== Proxy Delegate =====================
+// ===================== Proxy =====================
 @interface CamHookProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
 @property (nonatomic, strong) dispatch_queue_t realQueue;
@@ -138,7 +151,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         }
     }
 
-    // 失败则放行真实帧
     if ([self.realDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
         [self.realDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
     }
@@ -160,6 +172,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)startRunning {
     %orig;
 
+    CamLog("startRunning called");
+
     if (gProvider) {
         VCamProviderDestroy(gProvider);
         gProvider = NULL;
@@ -168,18 +182,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     if (gProvider && VCamProviderIsReady(gProvider)) {
         CamHookShowBanner("\xE2\x9C\x93 CamHook \xE6\x8D\xA2\xE5\xB8\xA7\xE6\xA8\xA1\xE5\xBC\x8F\xE5\xB7\xB2\xE5\x90\xAF\xE7\x94\xA8");
-        os_log(OS_LOG_DEFAULT, "[CamHook] VCam ready");
+        CamLog("VCam ready");
     } else {
         CamHookShowBanner("\xE2\x9C\x93 CamHook \xE5\xB7\xB2\xE5\x8A\xA0\xE8\xBD\xBD (\xE6\x97\xA0\xE8\xA7\x86\xE9\xA2\x91)");
-        os_log(OS_LOG_DEFAULT, "[CamHook] VCam FAILED, path=%s", kTestVideoPath);
+        CamLog("VCam FAILED, path=%s", kTestVideoPath);
     }
 }
 %end
 
 %hook AVCaptureVideoDataOutput
 - (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
-    os_log(OS_LOG_DEFAULT, "[CamHook] setSampleBufferDelegate: %{public}@",
-           NSStringFromClass(object_getClass(sampleBufferDelegate)));
+    CamLog("setSampleBufferDelegate: %s", NSStringFromClass(object_getClass(sampleBufferDelegate)).UTF8String);
 
     if (sampleBufferDelegate && sampleBufferCallbackQueue) {
         CamHookProxy *proxy = [CamHookProxy new];
@@ -194,5 +207,11 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 %end
 
 %ctor {
-    os_log(OS_LOG_DEFAULT, "[CamHook] 注入换帧版已加载");
+    // 清空旧日志
+    FILE *fp = fopen("/var/mobile/Media/camhook.log", "w");
+    if (fp) {
+        fprintf(fp, "=== CamHook started ===\n");
+        fclose(fp);
+    }
+    CamLog("inject loaded");
 }
