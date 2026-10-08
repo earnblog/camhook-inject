@@ -1,13 +1,13 @@
-TARGET := iphone:clang:latest:15.0
-ARCHS := arm64e
-THEOS_PACKAGE_SCHEME := rootless
-
-include $(THEOS)/makefiles/common.mk
-
-TWEAK_NAME := CamHook
-
-CamHook_FILES := Tweak.x VCamProvider.m
-CamHook_FRAMEWORKS := Foundation AVFoundation CoreMedia CoreVideo UIKit Photos
-CamHook_CFLAGS := -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations
-
-include $(THEOS_MAKE_PATH)/tweak.mk
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Filter</key>
+	<dict>
+		<key>Bundles</key>
+		<array>
+			<string>com.apple.camera</string>
+		</array>
+	</dict>
+</dict>
+</plist>
