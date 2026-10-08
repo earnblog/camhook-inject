@@ -7,8 +7,6 @@
 		<key>Bundles</key>
 		<array>
 			<string>com.apple.camera</string>
-			<string>com.tencent.xin</string>
-			<string>com.ss.iphone.ugc.Aweme</string>
 		</array>
 	</dict>
 </dict>
