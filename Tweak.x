@@ -1,23 +1,15 @@
-// CamHook 注入换帧版 —— 失败原因直接显示在横幅
+// CamHook —— Documents/test.mp4 自动复制到 /var/tmp 再加载
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
-#import <os/log.h>
 #import <objc/runtime.h>
 #import "VCamProvider.h"
 
 static VCamProvider *gProvider = NULL;
 static NSTimeInterval gLastBanner = 0;
 
-// 自动尝试的路径列表
-static const char *kVideoPaths[] = {
-    "/var/mobile/Media/test.mp4",
-    "/var/mobile/Documents/test.mp4",
-    "/var/tmp/test.mp4",
-    "/private/var/mobile/Media/test.mp4",
-    NULL
-};
+static const char *kSrcPath = "/var/mobile/Documents/test.mp4";
+static const char *kDstPath = "/var/tmp/test.mp4";
 
-// 简易文件日志（写到更稳的位置）
 static void CamLog(const char *fmt, ...) {
     FILE *fp = fopen("/var/tmp/camhook.log", "a");
     if (!fp) return;
@@ -32,7 +24,6 @@ static void CamLog(const char *fmt, ...) {
     fclose(fp);
 }
 
-// ===================== 安全横幅 =====================
 static void CamHookShowBanner(const char *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -43,10 +34,7 @@ static void CamHookShowBanner(const char *msg) {
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (w.isKeyWindow) {
-                        win = w;
-                        break;
-                    }
+                    if (w.isKeyWindow) { win = w; break; }
                 }
             }
             if (win) break;
@@ -71,10 +59,7 @@ static void CamHookShowBanner(const char *msg) {
         [banner addSubview:label];
         [win addSubview:banner];
 
-        [UIView animateWithDuration:0.3 animations:^{
-            banner.alpha = 1.0;
-        }];
-
+        [UIView animateWithDuration:0.3 animations:^{ banner.alpha = 1.0; }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [banner removeFromSuperview];
@@ -82,7 +67,37 @@ static void CamHookShowBanner(const char *msg) {
     });
 }
 
-// ===================== 创建新的 CMSampleBuffer =====================
+// 把 Documents 的视频复制到 /var/tmp
+static BOOL CamHookPrepareVideo(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *src = [NSString stringWithUTF8String:kSrcPath];
+    NSString *dst = [NSString stringWithUTF8String:kDstPath];
+
+    if (![fm fileExistsAtPath:src]) {
+        CamLog("source not exist: %s", kSrcPath);
+        // 源没有的话，若 tmp 已有也继续用
+        if ([fm fileExistsAtPath:dst]) {
+            CamLog("use existing tmp video");
+            return YES;
+        }
+        return NO;
+    }
+
+    // 删掉旧的 tmp
+    if ([fm fileExistsAtPath:dst]) {
+        [fm removeItemAtPath:dst error:nil];
+    }
+
+    NSError *err = nil;
+    BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
+    if (!ok) {
+        CamLog("copy failed: %s", err.localizedDescription.UTF8String ?: "unknown");
+        return NO;
+    }
+    CamLog("copied Documents -> /var/tmp/test.mp4 OK");
+    return YES;
+}
+
 static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
                                                    CMTime pts,
                                                    CMTime duration) {
@@ -109,7 +124,6 @@ static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
     return (status == noErr) ? newBuffer : NULL;
 }
 
-// ===================== Proxy =====================
 @interface CamHookProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
 @end
@@ -151,7 +165,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 @end
 
-// ===================== Hooks =====================
 %hook AVCaptureSession
 - (void)startRunning {
     %orig;
@@ -163,29 +176,26 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         gProvider = NULL;
     }
 
-    // 自动尝试多个路径
-    const char *usedPath = NULL;
-    for (int i = 0; kVideoPaths[i] != NULL; i++) {
-        CamLog("try path: %s", kVideoPaths[i]);
-        gProvider = VCamProviderCreate(kVideoPaths[i]);
-        if (gProvider && VCamProviderIsReady(gProvider)) {
-            usedPath = kVideoPaths[i];
-            break;
-        }
+    // 1. 准备视频（Documents -> tmp）
+    BOOL prepared = CamHookPrepareVideo();
+    if (!prepared) {
+        CamHookShowBanner("✓ CamHook 已加载\n请把 test.mp4 放到\n/var/mobile/Documents/");
+        CamLog("prepare failed");
+        return;
+    }
+
+    // 2. 从 tmp 加载
+    gProvider = VCamProviderCreate(kDstPath);
+    if (gProvider && VCamProviderIsReady(gProvider)) {
+        CamHookShowBanner("✓ CamHook 换帧已启用\n/var/tmp/test.mp4");
+        CamLog("SUCCESS");
+    } else {
+        CamHookShowBanner("✓ CamHook 已加载\n视频解码失败");
+        CamLog("VCamProviderCreate failed");
         if (gProvider) {
             VCamProviderDestroy(gProvider);
             gProvider = NULL;
         }
-    }
-
-    if (gProvider && usedPath) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "✓ CamHook 换帧已启用\n%s", usedPath);
-        CamHookShowBanner(msg);
-        CamLog("SUCCESS: %s", usedPath);
-    } else {
-        CamHookShowBanner("✓ CamHook 已加载\n无可用视频\n请把 test.mp4 放到 Media 或 Documents");
-        CamLog("ALL PATHS FAILED");
     }
 }
 %end
