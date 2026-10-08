@@ -1,8 +1,8 @@
 Package: com.earnblog.camhook
 Name: CamHook
-Version: 0.2.1
+Version: 0.2.2
 Architecture: iphoneos-arm64
-Description: 相机预览覆盖为所选视频
+Description: 相机每次选视频并覆盖预览
 Maintainer: earnblog
 Author: earnblog
 Section: Tweaks
