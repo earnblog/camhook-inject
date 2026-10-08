@@ -1,4 +1,4 @@
-// CamHook —— 照片/视频盖住预览，顶部停止，视频只播一遍
+// CamHook —— 停止后可以换一张
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <PhotosUI/PhotosUI.h>
@@ -12,10 +12,12 @@ static VCamProvider *gProvider = NULL;
 static NSTimeInterval gLastBanner = 0;
 static BOOL gPickerShowing = NO;
 static NSInteger gGen = 0;
+static NSInteger gReselectGen = 0;
 static AVPlayer *gPlayer = NULL;
 static AVPlayerLayer *gPlayerLayer = NULL;
 static UIView *gOverlay = NULL;
 static UIWindow *gOverlayWindow = nil;
+static UIWindow *gReselectWindow = nil;
 static id gEndObserver = nil;
 
 static void CamLog(const char *fmt, ...) {
@@ -32,6 +34,11 @@ static void CamLog(const char *fmt, ...) {
     fclose(fp);
 }
 
+static void CamHookStopPreview(void);
+static void CamHookShowReselectButton(void);
+static void CamHookHideReselectButton(void);
+static void CamHookPresentPicker(void);
+
 static UIWindowScene *CamHookScene(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if ([scene isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)scene;
@@ -39,12 +46,16 @@ static UIWindowScene *CamHookScene(void) {
     return nil;
 }
 
+static BOOL CamHookIsOurWindow(UIWindow *w) {
+    return w == gOverlayWindow || w == gReselectWindow;
+}
+
 static void CamHookRestoreCameraWindow(void) {
     UIWindow *best = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if (w == gOverlayWindow || w.hidden) continue;
+            if (CamHookIsOurWindow(w) || w.hidden) continue;
             if (!best || w.windowLevel < best.windowLevel) best = w;
         }
     }
@@ -56,7 +67,7 @@ static UIViewController *CamHookTopVC(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if (w == gOverlayWindow || w.hidden) continue;
+            if (CamHookIsOurWindow(w) || w.hidden) continue;
             if (w.isKeyWindow) { win = w; break; }
             if (!win) win = w;
         }
@@ -78,13 +89,13 @@ static void CamHookShowBanner(const char *msg) {
             for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
                 if (![scene isKindOfClass:[UIWindowScene class]]) continue;
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (!w.hidden && w != gOverlayWindow) { win = w; break; }
+                    if (!w.hidden && !CamHookIsOurWindow(w)) { win = w; break; }
                 }
             }
         }
         if (!win) return;
         CGFloat width = win.bounds.size.width - 24.0;
-        CGFloat topY = win.safeAreaInsets.top > 20 ? win.safeAreaInsets.top + 58 : 100;
+        CGFloat topY = win.safeAreaInsets.top > 20 ? win.safeAreaInsets.top + 58 : 108;
         UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(12, topY, width, 52)];
         banner.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.88];
         banner.layer.cornerRadius = 12.0;
@@ -105,6 +116,11 @@ static void CamHookShowBanner(const char *msg) {
 
 static NSString *CamHookTempVideoPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"camhook_selected.mp4"];
+}
+
+static void CamHookHideReselectButton(void) {
+    gReselectWindow.hidden = YES;
+    gReselectWindow = nil;
 }
 
 static void CamHookTearDownOverlay(void) {
@@ -140,9 +156,64 @@ static void CamHookStopPreview(void) {
 @interface CamHookStopTarget : NSObject
 @end
 @implementation CamHookStopTarget
-- (void)onStop:(id)sender { CamHookStopPreview(); }
+- (void)onStop:(id)sender {
+    CamHookStopPreview();
+    CamHookShowReselectButton();
+}
+- (void)onReselect:(id)sender {
+    NSInteger token = ++gReselectGen;
+    CamHookHideReselectButton();
+    CamHookStopPreview();
+    gPickerShowing = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (token != gReselectGen) return;
+        CamHookPresentPicker();
+    });
+}
 @end
 static CamHookStopTarget *gStopTarget = nil;
+
+static void CamHookShowReselectButton(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ CamHookShowReselectButton(); });
+        return;
+    }
+    if (gOverlayWindow || gPickerShowing) return;
+    CamHookHideReselectButton();
+    UIWindowScene *scene = CamHookScene();
+    if (!scene) return;
+    if (!gStopTarget) gStopTarget = [CamHookStopTarget new];
+
+    CGRect bounds = scene.coordinateSpace.bounds;
+    CGFloat top = 48;
+    for (UIWindow *w in scene.windows) {
+        if (CamHookIsOurWindow(w) || w.hidden) continue;
+        if (w.safeAreaInsets.top > 20) { top = w.safeAreaInsets.top; break; }
+    }
+    UIWindow *w = [[UIWindow alloc] initWithWindowScene:scene];
+    w.frame = CGRectMake((bounds.size.width - 120.0) / 2.0, top + 8.0, 120.0, 40.0);
+    w.windowLevel = UIWindowLevelAlert + 2.0;
+    w.backgroundColor = [UIColor clearColor];
+    UIViewController *root = [UIViewController new];
+    root.view.backgroundColor = [UIColor clearColor];
+    w.rootViewController = root;
+
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = root.view.bounds;
+    b.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    b.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+    b.layer.cornerRadius = 20.0;
+    b.clipsToBounds = YES;
+    [b setTitle:@"换一个" forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:16.0];
+    [b addTarget:gStopTarget action:@selector(onReselect:) forControlEvents:UIControlEventTouchUpInside];
+    [root.view addSubview:b];
+    w.hidden = NO;
+    gReselectWindow = w;
+    CamLog("reselect button");
+}
 
 @interface CamHookOverlayView : UIView
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
@@ -157,6 +228,7 @@ static CamHookStopTarget *gStopTarget = nil;
 static UIWindow *CamHookMakeOverlayWindow(void) {
     UIWindowScene *scene = CamHookScene();
     if (!scene) return nil;
+    CamHookHideReselectButton();
     CamHookTearDownOverlay();
     if (!gStopTarget) gStopTarget = [CamHookStopTarget new];
 
@@ -177,12 +249,28 @@ static UIWindow *CamHookMakeOverlayWindow(void) {
     [stop setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     stop.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
     [stop addTarget:gStopTarget action:@selector(onStop:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *swap = [UIButton buttonWithType:UIButtonTypeSystem];
+    swap.translatesAutoresizingMaskIntoConstraints = NO;
+    swap.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.82];
+    swap.layer.cornerRadius = 22.0;
+    swap.clipsToBounds = YES;
+    [swap setTitle:@"换一个" forState:UIControlStateNormal];
+    [swap setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    swap.titleLabel.font = [UIFont boldSystemFontOfSize:18.0];
+    [swap addTarget:gStopTarget action:@selector(onReselect:) forControlEvents:UIControlEventTouchUpInside];
+
     [root.view addSubview:stop];
+    [root.view addSubview:swap];
     [NSLayoutConstraint activateConstraints:@[
         [stop.topAnchor constraintEqualToAnchor:root.view.safeAreaLayoutGuide.topAnchor constant:8],
-        [stop.centerXAnchor constraintEqualToAnchor:root.view.centerXAnchor],
-        [stop.widthAnchor constraintEqualToConstant:160],
+        [stop.trailingAnchor constraintEqualToAnchor:root.view.centerXAnchor constant:-6],
+        [stop.widthAnchor constraintEqualToConstant:110],
         [stop.heightAnchor constraintEqualToConstant:44],
+        [swap.topAnchor constraintEqualToAnchor:stop.topAnchor],
+        [swap.leadingAnchor constraintEqualToAnchor:root.view.centerXAnchor constant:6],
+        [swap.widthAnchor constraintEqualToConstant:110],
+        [swap.heightAnchor constraintEqualToConstant:44],
     ]];
 
     ow.hidden = NO;
@@ -195,7 +283,6 @@ static void CamHookShowOverlay(NSString *videoPath) {
         if (videoPath.length == 0) return;
         UIWindow *ow = CamHookMakeOverlayWindow();
         if (!ow) return;
-
         CamHookOverlayView *box = [[CamHookOverlayView alloc] initWithFrame:ow.bounds];
         box.backgroundColor = [UIColor blackColor];
         box.userInteractionEnabled = NO;
@@ -212,6 +299,7 @@ static void CamHookShowOverlay(NSString *videoPath) {
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *note) {
             CamHookStopPreview();
+            CamHookShowReselectButton();
         }];
         gPlayerLayer = [AVPlayerLayer playerLayerWithPlayer:gPlayer];
         gPlayerLayer.frame = box.bounds;
@@ -273,7 +361,8 @@ static BOOL CamHookLoadVideoAtPath(NSString *path) {
         CamHookRestoreCameraWindow();
     }];
     if (results.count == 0) {
-        CamHookShowBanner("已取消");
+        CamHookShowReselectButton();
+        CamHookShowBanner("已取消，点「换一个」再选");
         return;
     }
     NSItemProvider *prov = results.firstObject.itemProvider;
@@ -282,6 +371,7 @@ static BOOL CamHookLoadVideoAtPath(NSString *path) {
                                     completionHandler:^(NSURL *url, NSError *error) {
             if (!url) {
                 CamHookShowBanner("视频读取失败");
+                CamHookShowReselectButton();
                 return;
             }
             NSString *dst = CamHookTempVideoPath();
@@ -289,11 +379,15 @@ static BOOL CamHookLoadVideoAtPath(NSString *path) {
             [fm removeItemAtPath:dst error:nil];
             if (![fm copyItemAtURL:url toURL:[NSURL fileURLWithPath:dst] error:nil]) {
                 CamHookShowBanner("复制视频失败");
+                CamHookShowReselectButton();
                 return;
             }
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (CamHookLoadVideoAtPath(dst)) CamHookShowBanner("只播一遍，点顶部红色停止");
-                else CamHookShowBanner("视频解码失败");
+                if (CamHookLoadVideoAtPath(dst)) CamHookShowBanner("只播一遍，可点「换一个」");
+                else {
+                    CamHookShowBanner("视频解码失败");
+                    CamHookShowReselectButton();
+                }
             });
         }];
         return;
@@ -302,27 +396,36 @@ static BOOL CamHookLoadVideoAtPath(NSString *path) {
         [prov loadObjectOfClass:[UIImage class] completionHandler:^(id obj, NSError *error) {
             if (![obj isKindOfClass:[UIImage class]]) {
                 CamHookShowBanner("照片读取失败");
+                CamHookShowReselectButton();
                 return;
             }
             CamHookShowImageOverlay((UIImage *)obj);
-            CamHookShowBanner("正在显示照片，点顶部红色停止");
+            CamHookShowBanner("正在显示照片，可点「换一个」");
         }];
         return;
     }
     CamHookShowBanner("这个文件不能用");
+    CamHookShowReselectButton();
 }
 @end
 static CamHookPickerDelegate *gPickerDelegate = nil;
 
-static void CamHookPresentPicker(void) {
+static void CamHookPresentPickerAttempt(int tries) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gPickerShowing) return;
+        CamHookHideReselectButton();
         CamHookStopPreview();
         UIViewController *top = CamHookTopVC();
+        if ((!top || top.presentedViewController) && tries > 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                CamHookPresentPickerAttempt(tries - 1);
+            });
+            return;
+        }
         if (!top || top.presentedViewController) {
-            CamLog("present skipped top=%s presented=%s",
-                   top ? NSStringFromClass(top.class).UTF8String : "nil",
-                   top.presentedViewController ? NSStringFromClass(top.presentedViewController.class).UTF8String : "nil");
+            CamHookShowReselectButton();
+            CamHookShowBanner("没能打开相册，点「换一个」再试");
             return;
         }
         if (!gPickerDelegate) gPickerDelegate = [CamHookPickerDelegate new];
@@ -336,6 +439,10 @@ static void CamHookPresentPicker(void) {
         [top presentViewController:picker animated:YES completion:nil];
         CamLog("picker presented");
     });
+}
+
+static void CamHookPresentPicker(void) {
+    CamHookPresentPickerAttempt(4);
 }
 
 static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pb, CMTime pts, CMTime duration) {
@@ -386,19 +493,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)startRunning {
     %orig;
     NSInteger gen = ++gGen;
-    gPickerShowing = NO;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        CamHookStopPreview();
-    });
+    AVCaptureSession *session = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (gen != gGen) return;
+        if (!session.isRunning) return;
         gPickerShowing = NO;
         CamHookPresentPicker();
     });
 }
 - (void)stopRunning {
     gGen++;
+    gReselectGen++;
+    CamHookHideReselectButton();
     CamHookStopPreview();
     %orig;
 }
@@ -419,6 +526,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 %ctor {
     FILE *fp = fopen("/var/tmp/camhook.log", "w");
-    if (fp) { fprintf(fp, "=== CamHook red-stop + picker ===\n"); fclose(fp); }
+    if (fp) { fprintf(fp, "=== CamHook reselect ===\n"); fclose(fp); }
     CamLog("loaded");
 }
