@@ -1,14 +1,14 @@
-// CamHook —— 优先使用 /var/tmp/test.mp4
+// CamHook —— 打开相机后从相册选择视频
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
+#import <Photos/Photos.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 #import <objc/runtime.h>
 #import "VCamProvider.h"
 
 static VCamProvider *gProvider = NULL;
 static NSTimeInterval gLastBanner = 0;
-
-static const char *kSrcPath = "/var/mobile/Documents/test.mp4";
-static const char *kDstPath = "/var/tmp/test.mp4";
+static BOOL gPickerShowing = NO;
 
 static void CamLog(const char *fmt, ...) {
     FILE *fp = fopen("/var/tmp/camhook.log", "a");
@@ -27,7 +27,7 @@ static void CamLog(const char *fmt, ...) {
 static void CamHookShowBanner(const char *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        if (now - gLastBanner < 3.0) return;
+        if (now - gLastBanner < 2.5) return;
         gLastBanner = now;
 
         UIWindow *win = nil;
@@ -60,50 +60,152 @@ static void CamHookShowBanner(const char *msg) {
         [win addSubview:banner];
 
         [UIView animateWithDuration:0.3 animations:^{ banner.alpha = 1.0; }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [banner removeFromSuperview];
         });
     });
 }
 
-// 优先 /var/tmp，没有再从 Documents 复制
-static BOOL CamHookPrepareVideo(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *src = [NSString stringWithUTF8String:kSrcPath];
-    NSString *dst = [NSString stringWithUTF8String:kDstPath];
+static NSString *CamHookTempVideoPath(void) {
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"camhook_selected.mp4"];
+}
 
-    // 1. 优先：tmp 已有就直接用
-    if ([fm fileExistsAtPath:dst]) {
-        CamLog("tmp video exists, use it: %s", kDstPath);
+static BOOL CamHookLoadVideoAtPath(NSString *path) {
+    if (gProvider) {
+        VCamProviderDestroy(gProvider);
+        gProvider = NULL;
+    }
+    gProvider = VCamProviderCreate(path.UTF8String);
+    if (gProvider && VCamProviderIsReady(gProvider)) {
+        CamLog("load OK: %s", path.UTF8String);
         return YES;
     }
-
-    // 2. tmp 没有，尝试从 Documents 复制
-    if ([fm fileExistsAtPath:src]) {
-        NSError *err = nil;
-        BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
-        if (ok) {
-            CamLog("copied Documents -> tmp OK");
-            return YES;
-        }
-        CamLog("copy failed: %s", err.localizedDescription.UTF8String ?: "unknown");
-        return NO;
+    CamLog("load FAIL: %s", path.UTF8String);
+    if (gProvider) {
+        VCamProviderDestroy(gProvider);
+        gProvider = NULL;
     }
-
-    CamLog("no video at tmp or Documents");
     return NO;
 }
 
+// ===================== 相册选择器 =====================
+@interface CamHookPickerDelegate : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@end
+
+@implementation CamHookPickerDelegate
+
+- (void)imagePickerController:(UIImagePickerController *)picker
+didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
+    gPickerShowing = NO;
+    NSURL *url = info[UIImagePickerControllerMediaURL];
+    [picker dismissViewControllerAnimated:YES completion:^{
+        if (!url) {
+            CamHookShowBanner("✓ CamHook\n未获取到视频");
+            return;
+        }
+        CamLog("picked: %s", url.path.UTF8String);
+
+        NSString *dst = CamHookTempVideoPath();
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm removeItemAtPath:dst error:nil];
+
+        NSError *err = nil;
+        BOOL ok = [fm copyItemAtPath:url.path toPath:dst error:&err];
+        if (!ok) {
+            // 有些相册视频是 file:// 临时文件，再试 data 方式
+            NSData *data = [NSData dataWithContentsOfURL:url];
+            ok = [data writeToFile:dst atomically:YES];
+            CamLog("copy via data: %d", ok);
+        }
+
+        if (!ok) {
+            CamHookShowBanner("✓ CamHook\n复制视频失败");
+            CamLog("copy failed: %s", err.localizedDescription.UTF8String ?: "");
+            return;
+        }
+
+        if (CamHookLoadVideoAtPath(dst)) {
+            CamHookShowBanner("✓ CamHook 换帧已启用\n已选择相册视频");
+        } else {
+            CamHookShowBanner("✓ CamHook\n视频解码失败");
+        }
+    }];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    gPickerShowing = NO;
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    CamHookShowBanner("✓ CamHook\n已取消选择");
+}
+
+@end
+
+static CamHookPickerDelegate *gPickerDelegate = nil;
+
+static UIViewController *CamHookTopVC(void) {
+    UIWindow *win = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.isKeyWindow) { win = w; break; }
+            }
+        }
+        if (win) break;
+    }
+    if (!win) return nil;
+    UIViewController *vc = win.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
+}
+
+static void CamHookPresentPicker(void) {
+    if (gPickerShowing) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = CamHookTopVC();
+        if (!top) {
+            CamLog("no top VC");
+            CamHookShowBanner("✓ CamHook\n无法弹出选择器");
+            return;
+        }
+
+        // 先请求相册权限
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+        if (status == PHAuthorizationStatusNotDetermined) {
+            [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus s) {
+                if (s == PHAuthorizationStatusAuthorized || s == PHAuthorizationStatusLimited) {
+                    CamHookPresentPicker();
+                } else {
+                    CamHookShowBanner("✓ CamHook\n需要相册权限");
+                }
+            }];
+            return;
+        }
+        if (status != PHAuthorizationStatusAuthorized && status != PHAuthorizationStatusLimited) {
+            CamHookShowBanner("✓ CamHook\n请到设置打开相册权限");
+            return;
+        }
+
+        if (!gPickerDelegate) gPickerDelegate = [CamHookPickerDelegate new];
+
+        UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+        picker.mediaTypes = @[(NSString *)kUTTypeMovie];
+        picker.delegate = gPickerDelegate;
+        picker.videoQuality = UIImagePickerControllerQualityTypeHigh;
+        gPickerShowing = YES;
+        [top presentViewController:picker animated:YES completion:nil];
+        CamLog("picker presented");
+    });
+}
+
+// ===================== SampleBuffer =====================
 static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
                                                    CMTime pts,
                                                    CMTime duration) {
     if (!pixelBuffer) return NULL;
-
     CMVideoFormatDescriptionRef formatDesc = NULL;
-    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,
-                                                                    pixelBuffer,
-                                                                    &formatDesc);
+    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDesc);
     if (status != noErr || !formatDesc) return NULL;
 
     CMSampleTimingInfo timing = {
@@ -111,11 +213,8 @@ static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
         .presentationTimeStamp = pts,
         .decodeTimeStamp = kCMTimeInvalid
     };
-
     CMSampleBufferRef newBuffer = NULL;
-    status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,
-                                                pixelBuffer,
-                                                true, NULL, NULL,
+    status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL,
                                                 formatDesc, &timing, &newBuffer);
     CFRelease(formatDesc);
     return (status == noErr) ? newBuffer : NULL;
@@ -162,34 +261,23 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 @end
 
+// ===================== Hooks =====================
 %hook AVCaptureSession
 - (void)startRunning {
     %orig;
-
     CamLog("startRunning");
 
-    if (gProvider) {
-        VCamProviderDestroy(gProvider);
-        gProvider = NULL;
-    }
-
-    if (!CamHookPrepareVideo()) {
-        CamHookShowBanner("✓ CamHook 已加载\n请把 test.mp4 放到\n/var/tmp/ 或 Documents/");
-        CamLog("prepare failed");
-        return;
-    }
-
-    gProvider = VCamProviderCreate(kDstPath);
-    if (gProvider && VCamProviderIsReady(gProvider)) {
-        CamHookShowBanner("✓ CamHook 换帧已启用\n/var/tmp/test.mp4");
-        CamLog("SUCCESS");
+    // 若已有选好的视频就直接用，否则弹出相册
+    NSString *temp = CamHookTempVideoPath();
+    if ([[NSFileManager defaultManager] fileExistsAtPath:temp] && CamHookLoadVideoAtPath(temp)) {
+        CamHookShowBanner("✓ CamHook 换帧已启用\n使用上次选择的视频");
     } else {
-        CamHookShowBanner("✓ CamHook 已加载\n视频解码失败");
-        CamLog("VCamProviderCreate failed");
-        if (gProvider) {
-            VCamProviderDestroy(gProvider);
-            gProvider = NULL;
-        }
+        CamHookShowBanner("✓ CamHook\n请选择视频…");
+        // 稍延迟，等界面起来再弹
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            CamHookPresentPicker();
+        });
     }
 }
 %end
@@ -210,7 +298,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 %ctor {
     FILE *fp = fopen("/var/tmp/camhook.log", "w");
     if (fp) {
-        fprintf(fp, "=== CamHook started ===\n");
+        fprintf(fp, "=== CamHook picker version ===\n");
         fclose(fp);
     }
     CamLog("loaded");
