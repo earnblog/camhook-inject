@@ -1,8 +1,8 @@
 Package: com.earnblog.camhook
 Name: CamHook
-Version: 0.2.0
+Version: 0.2.1
 Architecture: iphoneos-arm64
-Description: 相机回调换帧插件（相册选视频）
+Description: 相机预览覆盖为所选视频
 Maintainer: earnblog
 Author: earnblog
 Section: Tweaks
