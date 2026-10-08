@@ -2,7 +2,6 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
-#import <MobileCoreServices/MobileCoreServices.h>
 #import <objc/runtime.h>
 #import "VCamProvider.h"
 
@@ -190,7 +189,7 @@ static void CamHookPresentPicker(void) {
 
         UIImagePickerController *picker = [[UIImagePickerController alloc] init];
         picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-        picker.mediaTypes = @[(NSString *)kUTTypeMovie];
+        picker.mediaTypes = @[@"public.movie"];
         picker.delegate = gPickerDelegate;
         picker.videoQuality = UIImagePickerControllerQualityTypeHigh;
         gPickerShowing = YES;
