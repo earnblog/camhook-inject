@@ -1,8 +1,11 @@
-// CamHook —— 每次打开相机都选视频 + 预览覆盖播放
+// CamHook —— 每次打开相机都选视频 + 高层窗口盖住实时预览
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
 #import <objc/runtime.h>
+#import <stdio.h>
+#import <time.h>
+#import <stdarg.h>
 #import "VCamProvider.h"
 
 static VCamProvider *gProvider = NULL;
@@ -11,6 +14,8 @@ static BOOL gPickerShowing = NO;
 static AVPlayer *gPlayer = NULL;
 static AVPlayerLayer *gPlayerLayer = NULL;
 static UIView *gOverlay = NULL;
+static UIWindow *gOverlayWindow = nil;
+static id gLoopObserver = nil;
 
 static void CamLog(const char *fmt, ...) {
     FILE *fp = fopen("/var/tmp/camhook.log", "a");
@@ -26,52 +31,6 @@ static void CamLog(const char *fmt, ...) {
     fclose(fp);
 }
 
-static void CamHookShowBanner(const char *msg) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        if (now - gLastBanner < 2.5) return;
-        gLastBanner = now;
-
-        UIWindow *win = nil;
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (w.isKeyWindow) { win = w; break; }
-                }
-            }
-            if (win) break;
-        }
-        if (!win) return;
-
-        CGFloat width = win.bounds.size.width - 24.0;
-        CGFloat topY = win.safeAreaInsets.top > 0 ? win.safeAreaInsets.top : 44.0;
-
-        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(12, topY + 8, width, 60)];
-        banner.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.88];
-        banner.layer.cornerRadius = 14.0;
-        banner.clipsToBounds = YES;
-        banner.alpha = 0.0;
-
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, width - 28, 60)];
-        label.text = [NSString stringWithUTF8String:msg];
-        label.textColor = [UIColor whiteColor];
-        label.font = [UIFont boldSystemFontOfSize:14.0];
-        label.numberOfLines = 2;
-        [banner addSubview:label];
-        [win addSubview:banner];
-
-        [UIView animateWithDuration:0.3 animations:^{ banner.alpha = 1.0; }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [banner removeFromSuperview];
-        });
-    });
-}
-
-static NSString *CamHookTempVideoPath(void) {
-    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"camhook_selected.mp4"];
-}
-
 static UIWindow *CamHookKeyWindow(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if ([scene isKindOfClass:[UIWindowScene class]]) {
@@ -83,6 +42,38 @@ static UIWindow *CamHookKeyWindow(void) {
     return nil;
 }
 
+static void CamHookShowBanner(const char *msg) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (now - gLastBanner < 2.5) return;
+        gLastBanner = now;
+        UIWindow *win = (gOverlayWindow && !gOverlayWindow.hidden) ? gOverlayWindow : CamHookKeyWindow();
+        if (!win) return;
+        CGFloat width = win.bounds.size.width - 24.0;
+        CGFloat topY = win.safeAreaInsets.top > 0 ? win.safeAreaInsets.top : 44.0;
+        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(12, topY + 8, width, 60)];
+        banner.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.88];
+        banner.layer.cornerRadius = 14.0;
+        banner.clipsToBounds = YES;
+        banner.userInteractionEnabled = NO;
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, width - 28, 60)];
+        label.text = [NSString stringWithUTF8String:msg];
+        label.textColor = [UIColor whiteColor];
+        label.font = [UIFont boldSystemFontOfSize:14.0];
+        label.numberOfLines = 2;
+        [banner addSubview:label];
+        [win addSubview:banner];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [banner removeFromSuperview];
+        });
+    });
+}
+
+static NSString *CamHookTempVideoPath(void) {
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"camhook_selected.mp4"];
+}
+
 static UIViewController *CamHookTopVC(void) {
     UIWindow *win = CamHookKeyWindow();
     if (!win) return nil;
@@ -91,47 +82,82 @@ static UIViewController *CamHookTopVC(void) {
     return vc;
 }
 
+@interface CamHookPassWindow : UIWindow
+@end
+@implementation CamHookPassWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event { return nil; }
+@end
+
+@interface CamHookOverlayView : UIView
+@property (nonatomic, strong) AVPlayerLayer *playerLayer;
+@end
+@implementation CamHookOverlayView
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.playerLayer.frame = self.bounds;
+}
+@end
+
+static void CamHookTearDownOverlay(void) {
+    if (gLoopObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:gLoopObserver];
+        gLoopObserver = nil;
+    }
+    if (gPlayer) { [gPlayer pause]; gPlayer = nil; }
+    gPlayerLayer = nil;
+    gOverlay = nil;
+    gOverlayWindow.hidden = YES;
+    gOverlayWindow = nil;
+}
+
 static void CamHookRemoveOverlay(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (gPlayer) { [gPlayer pause]; gPlayer = nil; }
-        if (gPlayerLayer) { [gPlayerLayer removeFromSuperlayer]; gPlayerLayer = nil; }
-        if (gOverlay) { [gOverlay removeFromSuperview]; gOverlay = nil; }
-    });
+    if ([NSThread isMainThread]) CamHookTearDownOverlay();
+    else dispatch_async(dispatch_get_main_queue(), ^{ CamHookTearDownOverlay(); });
 }
 
 static void CamHookShowOverlay(NSString *videoPath) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = CamHookKeyWindow();
-        if (!win || !videoPath) return;
+        UIWindow *key = CamHookKeyWindow();
+        if (!key || videoPath.length == 0) return;
+        CamHookTearDownOverlay();
 
-        CamHookRemoveOverlay();
+        CamHookPassWindow *ow = [[CamHookPassWindow alloc] initWithWindowScene:key.windowScene];
+        ow.frame = key.bounds;
+        ow.windowLevel = UIWindowLevelAlert + 1.0;
+        ow.backgroundColor = [UIColor blackColor];
+        UIViewController *root = [UIViewController new];
+        root.view.backgroundColor = [UIColor blackColor];
+        ow.rootViewController = root;
+        ow.hidden = NO;
+
+        CamHookOverlayView *box = [[CamHookOverlayView alloc] initWithFrame:ow.bounds];
+        box.backgroundColor = [UIColor blackColor];
+        box.userInteractionEnabled = NO;
+        box.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [root.view addSubview:box];
 
         NSURL *url = [NSURL fileURLWithPath:videoPath];
         AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
         gPlayer = [AVPlayer playerWithPlayerItem:item];
+        gPlayer.muted = YES;
         gPlayer.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-
-        [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
-                                                          object:item
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification *note) {
+        gLoopObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                        object:item
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
             [gPlayer seekToTime:kCMTimeZero];
             [gPlayer play];
         }];
-
-        gOverlay = [[UIView alloc] initWithFrame:win.bounds];
-        gOverlay.backgroundColor = [UIColor blackColor];
-        gOverlay.userInteractionEnabled = NO;
-        gOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-
         gPlayerLayer = [AVPlayerLayer playerLayerWithPlayer:gPlayer];
-        gPlayerLayer.frame = gOverlay.bounds;
+        gPlayerLayer.frame = box.bounds;
         gPlayerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
-        [gOverlay.layer addSublayer:gPlayerLayer];
-
-        [win addSubview:gOverlay];
+        [box.layer addSublayer:gPlayerLayer];
+        box.playerLayer = (AVPlayerLayer *)gPlayerLayer;
+        gOverlay = box;
+        gOverlayWindow = ow;
         [gPlayer play];
-        CamLog("overlay playing: %s", videoPath.UTF8String);
+        CamLog("overlay window up: %s", videoPath.UTF8String);
     });
 }
 
@@ -156,7 +182,6 @@ static BOOL CamHookLoadVideoAtPath(NSString *path) {
 
 @interface CamHookPickerDelegate : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @end
-
 @implementation CamHookPickerDelegate
 - (void)imagePickerController:(UIImagePickerController *)picker
 didFinishPickingMediaWithInfo:(NSDictionary *)info {
@@ -170,7 +195,6 @@ didFinishPickingMediaWithInfo:(NSDictionary *)info {
         NSString *dst = CamHookTempVideoPath();
         NSFileManager *fm = [NSFileManager defaultManager];
         [fm removeItemAtPath:dst error:nil];
-
         NSError *err = nil;
         BOOL ok = [fm copyItemAtPath:url.path toPath:dst error:&err];
         if (!ok) {
@@ -188,7 +212,6 @@ didFinishPickingMediaWithInfo:(NSDictionary *)info {
         }
     }];
 }
-
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
     gPickerShowing = NO;
     [picker dismissViewControllerAnimated:YES completion:nil];
@@ -206,7 +229,6 @@ static void CamHookPresentPicker(void) {
             CamHookShowBanner("✓ CamHook\n无法弹出选择器");
             return;
         }
-
         PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
         if (status == PHAuthorizationStatusNotDetermined) {
             [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus s) {
@@ -222,7 +244,6 @@ static void CamHookPresentPicker(void) {
             CamHookShowBanner("✓ CamHook\n请到设置打开相册权限");
             return;
         }
-
         if (!gPickerDelegate) gPickerDelegate = [CamHookPickerDelegate new];
         UIImagePickerController *picker = [[UIImagePickerController alloc] init];
         picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
@@ -248,7 +269,6 @@ static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pb, CMTime p
 @interface CamHookProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
 @end
-
 @implementation CamHookProxy
 - (void)captureOutput:(AVCaptureOutput *)output
 didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
@@ -282,15 +302,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)startRunning {
     %orig;
     CamLog("startRunning");
-
-    // B：每次都弹出相册选择
     CamHookShowBanner("✓ CamHook\n请选择视频…");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         CamHookPresentPicker();
     });
 }
-
 - (void)stopRunning {
     CamHookRemoveOverlay();
     %orig;
@@ -312,6 +329,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 %ctor {
     FILE *fp = fopen("/var/tmp/camhook.log", "w");
-    if (fp) { fprintf(fp, "=== CamHook always-pick + overlay ===\n"); fclose(fp); }
+    if (fp) { fprintf(fp, "=== CamHook overlay window ===\n"); fclose(fp); }
     CamLog("loaded");
 }
