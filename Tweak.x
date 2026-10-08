@@ -1,4 +1,4 @@
-// CamHook —— Documents/test.mp4 自动复制到 /var/tmp 再加载
+// CamHook —— 优先使用 /var/tmp/test.mp4
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -67,35 +67,32 @@ static void CamHookShowBanner(const char *msg) {
     });
 }
 
-// 把 Documents 的视频复制到 /var/tmp
+// 优先 /var/tmp，没有再从 Documents 复制
 static BOOL CamHookPrepareVideo(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *src = [NSString stringWithUTF8String:kSrcPath];
     NSString *dst = [NSString stringWithUTF8String:kDstPath];
 
-    if (![fm fileExistsAtPath:src]) {
-        CamLog("source not exist: %s", kSrcPath);
-        // 源没有的话，若 tmp 已有也继续用
-        if ([fm fileExistsAtPath:dst]) {
-            CamLog("use existing tmp video");
+    // 1. 优先：tmp 已有就直接用
+    if ([fm fileExistsAtPath:dst]) {
+        CamLog("tmp video exists, use it: %s", kDstPath);
+        return YES;
+    }
+
+    // 2. tmp 没有，尝试从 Documents 复制
+    if ([fm fileExistsAtPath:src]) {
+        NSError *err = nil;
+        BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
+        if (ok) {
+            CamLog("copied Documents -> tmp OK");
             return YES;
         }
-        return NO;
-    }
-
-    // 删掉旧的 tmp
-    if ([fm fileExistsAtPath:dst]) {
-        [fm removeItemAtPath:dst error:nil];
-    }
-
-    NSError *err = nil;
-    BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
-    if (!ok) {
         CamLog("copy failed: %s", err.localizedDescription.UTF8String ?: "unknown");
         return NO;
     }
-    CamLog("copied Documents -> /var/tmp/test.mp4 OK");
-    return YES;
+
+    CamLog("no video at tmp or Documents");
+    return NO;
 }
 
 static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
@@ -176,15 +173,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         gProvider = NULL;
     }
 
-    // 1. 准备视频（Documents -> tmp）
-    BOOL prepared = CamHookPrepareVideo();
-    if (!prepared) {
-        CamHookShowBanner("✓ CamHook 已加载\n请把 test.mp4 放到\n/var/mobile/Documents/");
+    if (!CamHookPrepareVideo()) {
+        CamHookShowBanner("✓ CamHook 已加载\n请把 test.mp4 放到\n/var/tmp/ 或 Documents/");
         CamLog("prepare failed");
         return;
     }
 
-    // 2. 从 tmp 加载
     gProvider = VCamProviderCreate(kDstPath);
     if (gProvider && VCamProviderIsReady(gProvider)) {
         CamHookShowBanner("✓ CamHook 换帧已启用\n/var/tmp/test.mp4");
