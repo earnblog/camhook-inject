@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME := CamHook
 
 CamHook_FILES := Tweak.x VCamProvider.m
-CamHook_FRAMEWORKS := Foundation AVFoundation CoreMedia CoreVideo UIKit Photos MobileCoreServices
+CamHook_FRAMEWORKS := Foundation AVFoundation CoreMedia CoreVideo UIKit Photos
 CamHook_CFLAGS := -fobjc-arc -Wno-unused-variable -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk
