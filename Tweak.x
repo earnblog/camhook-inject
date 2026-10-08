@@ -1,4 +1,4 @@
-// CamHook —— 系统相机预览覆盖为所选视频
+// CamHook —— 每次打开相机都选视频 + 预览覆盖播放
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
@@ -91,25 +91,14 @@ static UIViewController *CamHookTopVC(void) {
     return vc;
 }
 
-// 去掉覆盖层
 static void CamHookRemoveOverlay(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (gPlayer) {
-            [gPlayer pause];
-            gPlayer = nil;
-        }
-        if (gPlayerLayer) {
-            [gPlayerLayer removeFromSuperlayer];
-            gPlayerLayer = nil;
-        }
-        if (gOverlay) {
-            [gOverlay removeFromSuperview];
-            gOverlay = nil;
-        }
+        if (gPlayer) { [gPlayer pause]; gPlayer = nil; }
+        if (gPlayerLayer) { [gPlayerLayer removeFromSuperlayer]; gPlayerLayer = nil; }
+        if (gOverlay) { [gOverlay removeFromSuperview]; gOverlay = nil; }
     });
 }
 
-// 在预览上盖一层循环播放
 static void CamHookShowOverlay(NSString *videoPath) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *win = CamHookKeyWindow();
@@ -122,7 +111,6 @@ static void CamHookShowOverlay(NSString *videoPath) {
         gPlayer = [AVPlayer playerWithPlayerItem:item];
         gPlayer.actionAtItemEnd = AVPlayerActionAtItemEndNone;
 
-        // 循环
         [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
                                                           object:item
                                                            queue:[NSOperationQueue mainQueue]
@@ -133,7 +121,7 @@ static void CamHookShowOverlay(NSString *videoPath) {
 
         gOverlay = [[UIView alloc] initWithFrame:win.bounds];
         gOverlay.backgroundColor = [UIColor blackColor];
-        gOverlay.userInteractionEnabled = NO; // 不挡相机按钮
+        gOverlay.userInteractionEnabled = NO;
         gOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
         gPlayerLayer = [AVPlayerLayer playerLayerWithPlayer:gPlayer];
@@ -141,11 +129,8 @@ static void CamHookShowOverlay(NSString *videoPath) {
         gPlayerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
         [gOverlay.layer addSublayer:gPlayerLayer];
 
-        // 插到最上层偏下一点，尽量不挡顶部控件；全屏铺满预览区
         [win addSubview:gOverlay];
-        // 让覆盖层在横幅之下、在预览之上：直接加到 window 上
         [gPlayer play];
-
         CamLog("overlay playing: %s", videoPath.UTF8String);
     });
 }
@@ -169,7 +154,6 @@ static BOOL CamHookLoadVideoAtPath(NSString *path) {
     return NO;
 }
 
-// ===================== 相册选择 =====================
 @interface CamHookPickerDelegate : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @end
 
@@ -249,7 +233,6 @@ static void CamHookPresentPicker(void) {
     });
 }
 
-// ===================== DataOutput 换帧（保留） =====================
 static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pb, CMTime pts, CMTime duration) {
     if (!pb) return NULL;
     CMVideoFormatDescriptionRef formatDesc = NULL;
@@ -295,22 +278,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 @end
 
-// ===================== Hooks =====================
 %hook AVCaptureSession
 - (void)startRunning {
     %orig;
     CamLog("startRunning");
 
-    NSString *temp = CamHookTempVideoPath();
-    if ([[NSFileManager defaultManager] fileExistsAtPath:temp] && CamHookLoadVideoAtPath(temp)) {
-        CamHookShowBanner("✓ CamHook 预览已切换\n使用上次选择的视频");
-    } else {
-        CamHookShowBanner("✓ CamHook\n请选择视频…");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            CamHookPresentPicker();
-        });
-    }
+    // B：每次都弹出相册选择
+    CamHookShowBanner("✓ CamHook\n请选择视频…");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CamHookPresentPicker();
+    });
 }
 
 - (void)stopRunning {
@@ -334,6 +312,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 %ctor {
     FILE *fp = fopen("/var/tmp/camhook.log", "w");
-    if (fp) { fprintf(fp, "=== CamHook preview overlay ===\n"); fclose(fp); }
+    if (fp) { fprintf(fp, "=== CamHook always-pick + overlay ===\n"); fclose(fp); }
     CamLog("loaded");
 }
